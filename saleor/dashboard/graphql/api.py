@@ -1,6 +1,5 @@
 import graphene
 import graphql_jwt
-from graphene_django.debug import DjangoDebug
 from graphene_django.filter import DjangoFilterConnectionField
 from graphql_jwt.decorators import staff_member_required
 
@@ -43,7 +42,6 @@ class Query(graphene.ObjectType):
         category_id=graphene.Argument(graphene.ID),
         description='List of shop\'s products.')
     node = graphene.Node.Field()
-    debug = graphene.Field(DjangoDebug, name='__debug')
 
     @staff_member_required
     def resolve_attributes(self, info):
@@ -62,7 +60,7 @@ class Query(graphene.ObjectType):
         return get_node(info, id, only_type=Page)
 
     @staff_member_required
-    def resolve_pages(self, info):
+    def resolve_pages(self, info, **kwargs):
         return resolve_all_pages()
 
     @staff_member_required
