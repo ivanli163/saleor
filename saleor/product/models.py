@@ -19,10 +19,10 @@ from versatileimagefield.fields import PPOIField, VersatileImageField
 
 from ..core.exceptions import InsufficientStock
 from ..discount.utils import calculate_discounted_price
-from .utils import get_attributes_display_map
+from ..seo.models import SeoModel
 
 
-class Category(MPTTModel):
+class Category(MPTTModel, SeoModel):
     name = models.CharField(max_length=128)
     slug = models.SlugField(max_length=128)
     description = models.TextField(blank=True)
@@ -89,7 +89,7 @@ class ProductQuerySet(models.QuerySet):
             Q(is_published=True))
 
 
-class Product(models.Model):
+class Product(SeoModel):
     product_type = models.ForeignKey(
         ProductType, related_name='products', on_delete=models.CASCADE)
     name = models.CharField(max_length=128)
@@ -100,7 +100,7 @@ class Product(models.Model):
         currency=settings.DEFAULT_CURRENCY, max_digits=12, decimal_places=2)
     available_on = models.DateField(blank=True, null=True)
     is_published = models.BooleanField(default=True)
-    attributes = HStoreField(default={})
+    attributes = HStoreField(default={}, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True)
     is_featured = models.BooleanField(default=False)
 
@@ -152,12 +152,6 @@ class Product(models.Model):
         first_image = self.images.first()
         return first_image.image if first_image else None
 
-    def get_attribute(self, pk):
-        return self.attributes.get(smart_text(pk))
-
-    def set_attribute(self, pk, value_pk):
-        self.attributes[smart_text(pk)] = smart_text(value_pk)
-
     def get_price_per_item(self, item, discounts=None):
         return item.get_price_per_item(discounts)
 
@@ -184,20 +178,20 @@ class Product(models.Model):
 
 class ProductVariant(models.Model):
     sku = models.CharField(max_length=32, unique=True)
-    name = models.CharField(max_length=100, blank=True)
+    name = models.CharField(max_length=255, blank=True)
     price_override = MoneyField(
         currency=settings.DEFAULT_CURRENCY, max_digits=12, decimal_places=2,
         blank=True, null=True)
     product = models.ForeignKey(
         Product, related_name='variants', on_delete=models.CASCADE)
-    attributes = HStoreField(default={})
+    attributes = HStoreField(default={}, blank=True)
     images = models.ManyToManyField('ProductImage', through='VariantImage')
 
     class Meta:
         app_label = 'product'
 
     def __str__(self):
-        return self.name or self.display_variant_attributes() or self.sku
+        return self.name or self.sku
 
     def check_quantity(self, quantity):
         total_available_quantity = self.get_stock_quantity()
@@ -232,23 +226,6 @@ class ProductVariant(models.Model):
     def is_in_stock(self):
         return any(
             [stock.quantity_available > 0 for stock in self.stock.all()])
-
-    def get_attribute(self, pk):
-        return self.attributes.get(smart_text(pk))
-
-    def set_attribute(self, pk, value_pk):
-        self.attributes[smart_text(pk)] = smart_text(value_pk)
-
-    def display_variant_attributes(self, attributes=None):
-        if attributes is None:
-            attributes = self.product.product_type.variant_attributes.all()
-        values = get_attributes_display_map(self, attributes)
-        if values:
-            return ', '.join(
-                ['%s: %s' % (smart_text(attributes.get(id=int(key))),
-                             smart_text(value))
-                 for (key, value) in values.items()])
-        return ''
 
     def display_product(self):
         variant_display = str(self)
@@ -396,7 +373,7 @@ class VariantImage(models.Model):
         ProductImage, related_name='variant_images', on_delete=models.CASCADE)
 
 
-class Collection(models.Model):
+class Collection(SeoModel):
     name = models.CharField(max_length=128, unique=True)
     slug = models.SlugField(max_length=128)
     products = models.ManyToManyField(

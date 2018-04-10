@@ -1,6 +1,6 @@
 import json
 from io import BytesIO
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from django.conf import settings
@@ -8,12 +8,11 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.forms import HiddenInput
 from django.forms.models import model_to_dict
 from django.urls import reverse
-from django.utils.encoding import smart_text
 from PIL import Image
 
 from saleor.dashboard.product import ProductBulkAction
 from saleor.dashboard.product.forms import (
-    ProductBulkUpdate, ProductForm, ProductTypeForm)
+    ProductBulkUpdate, ProductForm, ProductTypeForm, ProductVariantForm)
 from saleor.product.forms import VariantChoiceField
 from saleor.product.models import (
     AttributeChoiceValue, Collection, Product, ProductAttribute, ProductImage,
@@ -31,6 +30,19 @@ def create_image():
     image = SimpleUploadedFile(
         image_name + '.jpg', img_data.getvalue(), 'image/png')
     return image, image_name
+
+
+def test_product_variant_form(product_in_stock):
+    variant = product_in_stock.variants.first()
+    variant.name = ''
+    variant.save()
+    example_size = 'Small Size'
+    data = {'attribute-size': example_size, 'sku': '1111'}
+    form = ProductVariantForm(data, instance=variant)
+    assert form.is_valid()
+    form.save()
+    variant.refresh_from_db()
+    assert variant.name == example_size
 
 
 @pytest.mark.integration
@@ -140,19 +152,21 @@ def test_change_attributes_in_product_form(
     product_type.product_attributes.add(text_attribute)
     color_value = color_attribute.values.first()
     new_author = 'Main Tester'
-    new_color = color_value.pk
     data = {
         'name': product.name,
         'price': product.price.amount,
         'category': product.category.pk,
         'description': 'description',
         'attribute-author': new_author,
-        'attribute-color': new_color}
+        'attribute-color': color_value.pk}
     form = ProductForm(data, instance=product)
     assert form.is_valid()
     product = form.save()
-    assert product.get_attribute(color_attribute.pk) == smart_text(new_color)
-    assert product.get_attribute(text_attribute.pk) == new_author
+    assert product.attributes[str(color_attribute.pk)] == str(color_value.pk)
+
+    # Check that new attribute was created for author
+    author_value = AttributeChoiceValue.objects.get(name=new_author)
+    assert product.attributes[str(text_attribute.pk)] == str(author_value.pk)
 
 
 def test_attribute_list(db, product_in_stock, color_attribute, admin_client):
@@ -468,7 +482,9 @@ def test_view_invalid_reorder_product_images(
     assert 'ordered_images' in resp_decoded['error']
 
 
-def test_view_product_image_add(admin_client, product_with_image):
+@patch('saleor.dashboard.product.forms.create_product_thumbnails.delay')
+def test_view_product_image_add(
+        mock_create_thumbnails, admin_client, product_with_image):
     assert len(ProductImage.objects.all()) == 1
     assert len(product_with_image.images.all()) == 1
     url = reverse(
@@ -486,10 +502,12 @@ def test_view_product_image_add(admin_client, product_with_image):
     assert len(images) == 2
     assert image_name in images[1].image.name
     assert images[1].alt == 'description'
+    mock_create_thumbnails.assert_called_once_with(images[1].pk)
 
 
+@patch('saleor.dashboard.product.forms.create_product_thumbnails.delay')
 def test_view_product_image_edit_same_image_add_description(
-        admin_client, product_with_image):
+        mock_create_thumbnails, admin_client, product_with_image):
     assert len(product_with_image.images.all()) == 1
     product_image = product_with_image.images.all()[0]
     url = reverse(
@@ -505,9 +523,12 @@ def test_view_product_image_edit_same_image_add_description(
     assert len(product_with_image.images.all()) == 1
     product_image.refresh_from_db()
     assert product_image.alt == 'description'
+    mock_create_thumbnails.assert_called_once_with(product_image.pk)
 
 
-def test_view_product_image_edit_new_image(admin_client, product_with_image):
+@patch('saleor.dashboard.product.forms.create_product_thumbnails.delay')
+def test_view_product_image_edit_new_image(
+        mock_create_thumbnails, admin_client, product_with_image):
     assert len(product_with_image.images.all()) == 1
     product_image = product_with_image.images.all()[0]
     url = reverse(
@@ -525,6 +546,7 @@ def test_view_product_image_edit_new_image(admin_client, product_with_image):
     product_image.refresh_from_db()
     assert image_name in product_image.image.name
     assert product_image.alt == 'description'
+    mock_create_thumbnails.assert_called_once_with(product_image.pk)
 
 
 def perform_bulk_action(product_list, action):
@@ -695,5 +717,58 @@ def test_sanitize_product_description(product_type, default_category):
     form.save()
     assert product.description == (
         '<b>bold</b><p><i>italic</i></p><h2>Header</h2><h3>subheader</h3>'
-        '<blockquote>quote</blockquote><p><a href="www.mirumee.com">link</a></p>'
+        '<blockquote>quote</blockquote>'
+        '<p><a href="www.mirumee.com">link</a></p>'
         '<p>an &lt;script&gt;evil()&lt;/script&gt;example</p>')
+
+    assert product.seo_description == (
+        'bolditalicHeadersubheaderquotelinkan evil()example')
+
+
+def test_set_product_seo_description(unavailable_product):
+    seo_description = (
+        'This is a dummy product. '
+        'HTML <b>shouldn\'t be removed</b> since it\'s a simple text field.')
+    data = model_to_dict(unavailable_product)
+    data['price'] = 20
+    data['description'] = 'a description'
+    data['seo_description'] = seo_description
+
+    form = ProductForm(data, instance=unavailable_product)
+
+    assert form.is_valid()
+    form.save()
+    assert unavailable_product.seo_description == seo_description
+
+
+def test_set_product_description_too_long_for_seo(unavailable_product):
+    description = (
+        'Saying it fourth made saw light bring beginning kind over herb '
+        'won\'t creepeth multiply dry rule divided fish herb cattle greater '
+        'fly divided midst, gathering can\'t moveth seed greater subdue. '
+        'Lesser meat living fowl called. Dry don\'t wherein. Doesn\'t above '
+        'form sixth. Image moving earth without forth light whales. Seas '
+        'were first form fruit that form they\'re, shall air. And. Good of'
+        'signs darkness be place. Was. Is form it. Whose. Herb signs stars '
+        'fill own fruit wherein. '
+        'Don\'t set man face living fifth Thing the whales were. '
+        'You fish kind. '
+        'Them, his under wherein place first you night gathering.')
+
+    data = model_to_dict(unavailable_product)
+    data['price'] = 20
+    data['description'] = description
+
+    form = ProductForm(data, instance=unavailable_product)
+
+    assert form.is_valid()
+    form.save()
+
+    assert len(unavailable_product.seo_description) <= 300
+    assert unavailable_product.seo_description == (
+        'Saying it fourth made saw light bring beginning kind over herb '
+        'won\'t creepeth multiply dry rule divided fish herb cattle greater '
+        'fly divided midst, gathering can\'t moveth seed greater subdue. '
+        'Lesser meat living fowl called. Dry don\'t wherein. Doesn\'t above '
+        'form sixth. Image moving earth without f...'
+    )

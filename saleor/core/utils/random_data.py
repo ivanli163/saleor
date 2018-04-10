@@ -2,7 +2,6 @@ import itertools
 import os
 import random
 import unicodedata
-from collections import defaultdict
 
 from django.conf import settings
 from django.contrib.auth.models import Group, Permission
@@ -15,6 +14,7 @@ from prices import Money, TaxedMoney
 
 from ...account.models import Address, User
 from ...account.utils import store_user_address
+from ...core.utils.text import strip_html_and_truncate
 from ...discount import DiscountValueType, VoucherType
 from ...discount.models import Sale, Voucher
 from ...menu.models import Menu
@@ -24,6 +24,8 @@ from ...page.models import Page
 from ...product.models import (
     AttributeChoiceValue, Category, Collection, Product, ProductAttribute,
     ProductImage, ProductType, ProductVariant, Stock, StockLocation)
+from ...product.thumbnails import create_product_thumbnails
+from ...product.utils.attributes import get_name_from_attributes
 from ...shipping.models import ANY_COUNTRY, ShippingMethod
 
 fake = Factory.create()
@@ -152,27 +154,6 @@ def set_product_attributes(product, product_type):
     product.save(update_fields=['attributes'])
 
 
-def set_variant_attributes(variant, product_type):
-    attr_dict = {}
-    existing_variants = variant.product.variants.values_list(
-        'attributes', flat=True)
-    existing_variant_attributes = defaultdict(list)
-    for variant_attrs in existing_variants:
-        for attr_id, value_id in variant_attrs.items():
-            existing_variant_attributes[attr_id].append(value_id)
-
-    for product_attribute in product_type.variant_attributes.all():
-        available_values = product_attribute.values.exclude(
-            pk__in=[int(pk) for pk
-                    in existing_variant_attributes[str(product_attribute.pk)]])
-        if not available_values:
-            return
-        value = random.choice(available_values)
-        attr_dict[str(product_attribute.pk)] = str(value.pk)
-    variant.attributes = attr_dict
-    variant.save(update_fields=['attributes'])
-
-
 def get_variant_combinations(product):
     # Returns all possible variant combinations
     # For example: product type has two variant attributes: Size, Color
@@ -292,10 +273,12 @@ def get_or_create_collection(name, placeholder_dir, image_name):
 
 
 def create_product(**kwargs):
+    description = fake.paragraphs(5)
     defaults = {
         'name': fake.company(),
         'price': fake.money(),
-        'description': '\n\n'.join(fake.paragraphs(5))}
+        'description': '\n\n'.join(description),
+        'seo_description': strip_html_and_truncate(description[0], 300)}
     defaults.update(kwargs)
     return Product.objects.create(**defaults)
 
@@ -315,19 +298,22 @@ def create_variant(product, **kwargs):
     defaults = {
         'product': product}
     defaults.update(kwargs)
-    variant = ProductVariant.objects.create(**defaults)
+    variant = ProductVariant(**defaults)
+    if variant.attributes:
+        variant.name = get_name_from_attributes(variant)
+    variant.save()
     create_stock(variant)
     return variant
 
 
 def create_product_image(product, placeholder_dir):
     placeholder_root = os.path.join(settings.PROJECT_ROOT, placeholder_dir)
-    img_path = '%s/%s' % (placeholder_dir,
-                          random.choice(os.listdir(placeholder_root)))
-    image = ProductImage(
-        product=product,
-        image=File(open(img_path, 'rb'))).save()
-    return image
+    image_name = random.choice(os.listdir(placeholder_root))
+    image = get_image(placeholder_dir, image_name)
+    product_image = ProductImage(product=product, image=image)
+    product_image.save()
+    create_product_thumbnails.delay(product_image.pk)
+    return product_image
 
 
 def create_attribute(**kwargs):
@@ -445,7 +431,6 @@ def create_fulfillments(order):
 
 
 def create_fake_order():
-
     user = random.choice([None, User.objects.filter(
         is_superuser=False).order_by('?').first()])
     if user:
@@ -585,51 +570,52 @@ def create_collections_by_schema(placeholder_dir, schema=COLLECTIONS_SCHEMA):
         yield 'Collection: %s' % (collection,)
 
 
-def create_fake_page():
-    title = fake.word()
-    return Page.objects.create(
-        slug=slugify(title),
-        title=title,
-        content='\n\n'.join(fake.paragraphs(5)),
-        is_visible=True)
-
-
-def create_pages(how_many=2):
-    for dummy in range(how_many):
-        page = create_fake_page()
-        yield 'Page: %s' % (page,)
+def create_page():
+    content = """
+    <h2 align="center">AN OPENSOURCE STOREFRONT PLATFORM FOR PERFECTIONISTS</h2>
+    <h3 align="center">WRITTEN IN PYTHON, BEST SERVED AS A BESPOKE, HIGH-PERFORMANCE E-COMMERCE SOLUTION</h3>
+    <p><br></p>
+    <p><img src="http://getsaleor.com/images/main-pic.svg"></p>
+    <p style="text-align: center;">
+        <a href="https://github.com/mirumee/saleor/">Get Saleor</a> today!
+    </p>
+    """
+    page_data = {'content': content, 'title': 'About', 'is_visible': True}
+    page, dummy = Page.objects.get_or_create(slug='about', **page_data)
+    yield 'Page %s created' % page.slug
 
 
 def create_menus():
-    slugs = ['navbar', 'footer']
-    for slug in slugs:
-        menu = Menu.objects.get_or_create(slug=slug)[0]
-        create_menu_items_by_schema(menu)
-        yield '%s menu created' % (menu,)
+    # Create navbar menu with category links
+    menu, _ = Menu.objects.get_or_create(slug='navbar')
+    if not menu.items.exists():
+        categories = Category.objects.all()
+        for category in categories:
+            menu.items.get_or_create(
+                name=category.name,
+                category=category)
+        yield 'Created navbar menu'
 
+    # Create footer menu with collections and pages
+    menu, _ = Menu.objects.get_or_create(slug='footer')
+    if not menu.items.exists():
+        collection = Collection.objects.order_by('?')[0]
+        item, _ = menu.items.get_or_create(
+            name='Collections',
+            collection=collection)
 
-def create_menu_items_by_schema(menu):
-    categories = Category.objects.all()
-    for category in categories:
+        for collection in Collection.objects.filter(
+                background_image__isnull=False):
+            menu.items.get_or_create(
+                name=collection.name,
+                collection=collection,
+                parent=item)
+
+        page = Page.objects.order_by('?')[0]
         menu.items.get_or_create(
-            name=category.name,
-            category=category)
-
-    collection = Collection.objects.order_by('?')[0]
-    item, _ = menu.items.get_or_create(
-        name='Collections',
-        collection=collection)
-
-    for collection in Collection.objects.filter(background_image__isnull=False):  # noqa
-        menu.items.get_or_create(
-            name=collection.name,
-            collection=collection,
-            parent=item)
-
-    page = Page.objects.order_by('?')[0]
-    menu.items.get_or_create(
-        name=page.title,
-        page=page)
+            name=page.title,
+            page=page)
+        yield 'Created footer menu'
 
 
 def get_product_list_images_dir(placeholder_dir):

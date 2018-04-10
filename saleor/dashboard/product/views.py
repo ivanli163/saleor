@@ -14,8 +14,9 @@ from ...core.utils import get_paginator_items
 from ...product.models import (
     AttributeChoiceValue, Product, ProductAttribute, ProductImage, ProductType,
     ProductVariant, Stock, StockLocation)
-from ...product.utils import (
-    get_availability, get_product_costs_data, get_variant_costs_data)
+from ...product.utils.availability import get_availability
+from ...product.utils.costs import (
+    get_product_costs_data, get_variant_costs_data)
 from ..views import staff_member_required
 from .filters import (
     ProductAttributeFilter, ProductFilter, ProductTypeFilter,
@@ -178,8 +179,7 @@ def product_create(request, type_pk):
 @permission_required('product.view_product')
 def product_detail(request, pk):
     products = Product.objects.prefetch_related(
-        'variants__stock', 'images',
-        'product_type__variant_attributes__values').all()
+        'variants__stock', 'images').all()
     product = get_object_or_404(products, pk=pk)
     variants = product.variants.all()
     images = product.images.all()
@@ -411,20 +411,15 @@ def variant_add(request, product_pk):
     product = get_object_or_404(Product.objects.all(), pk=product_pk)
     variant = ProductVariant(product=product)
     form = forms.ProductVariantForm(request.POST or None, instance=variant)
-    attribute_form = forms.VariantAttributeForm(
-        request.POST or None, instance=variant)
-    if form.is_valid() and attribute_form.is_valid():
+    if form.is_valid():
         form.save()
-        attribute_form.save()
         msg = pgettext_lazy(
             'Dashboard message', 'Saved variant %s') % (variant.name,)
         messages.success(request, msg)
         return redirect(
             'dashboard:variant-details', product_pk=product.pk,
             variant_pk=variant.pk)
-    ctx = {
-        'attribute_form': attribute_form, 'form': form, 'product': product,
-        'variant': variant}
+    ctx = {'form': form, 'product': product, 'variant': variant}
     return TemplateResponse(
         request,
         'dashboard/product/product_variant/form.html',
@@ -437,20 +432,15 @@ def variant_edit(request, product_pk, variant_pk):
     product = get_object_or_404(Product.objects.all(), pk=product_pk)
     variant = get_object_or_404(product.variants.all(), pk=variant_pk)
     form = forms.ProductVariantForm(request.POST or None, instance=variant)
-    attribute_form = forms.VariantAttributeForm(
-        request.POST or None, instance=variant)
-    if form.is_valid() and attribute_form.is_valid():
+    if form.is_valid():
         form.save()
-        attribute_form.save()
         msg = pgettext_lazy(
             'Dashboard message', 'Saved variant %s') % (variant.name,)
         messages.success(request, msg)
         return redirect(
             'dashboard:variant-details', product_pk=product.pk,
             variant_pk=variant.pk)
-    ctx = {
-        'attribute_form': attribute_form, 'form': form, 'product': product,
-        'variant': variant}
+    ctx = {'form': form, 'product': product, 'variant': variant}
     return TemplateResponse(
         request,
         'dashboard/product/product_variant/form.html',
@@ -462,8 +452,7 @@ def variant_edit(request, product_pk, variant_pk):
 def variant_details(request, product_pk, variant_pk):
     product = get_object_or_404(Product, pk=product_pk)
     qs = product.variants.prefetch_related(
-        'stock__location',
-        'product__product_type__variant_attributes__values')
+        'stock__location')
     variant = get_object_or_404(qs, pk=variant_pk)
 
     # If the product type of this product assumes no variants, redirect to
@@ -795,9 +784,13 @@ def ajax_available_variants_list(request):
             variant.sku, variant.display_product(),
             prices_i18n.amount(variant.get_price_per_item(discounts).gross))
 
-    available_products = Product.objects.available_products()
+    available_products = Product.objects.available_products().prefetch_related(
+        'category',
+        'product_type__product_attributes')
     queryset = ProductVariant.objects.filter(
-        product__in=available_products).prefetch_related('product')
+        product__in=available_products).prefetch_related(
+            'product__category',
+            'product__product_type__product_attributes')
     search_query = request.GET.get('q', '')
     if search_query:
         queryset = queryset.filter(
