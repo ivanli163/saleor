@@ -372,7 +372,7 @@ class Checkout:
 
     def get_total(self):
         """Calculate order total with shipping and discount amount."""
-        total = self.cart.get_total()
+        total = self.get_subtotal()
         if self.shipping_method and self.is_shipping_required:
             total += self.shipping_method.get_total_price()
         if self.discount:

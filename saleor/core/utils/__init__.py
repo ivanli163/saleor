@@ -129,7 +129,6 @@ def apply_tax_to_price(taxes, rate_name, base):
         raise TypeError('Unknown base for flat_tax: %r' % (base,))
 
     tax_to_apply = taxes.get(rate_name, taxes['standard'])
-
     return tax_to_apply(base, not settings.INCLUDE_TAXES_IN_PRICES)
 
 
